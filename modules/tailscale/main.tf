@@ -1,0 +1,155 @@
+resource "aws_iam_instance_profile" "default" {
+  name = "${var.workload}-subnet-router"
+  role = aws_iam_role.default.id
+}
+
+resource "aws_instance" "default" {
+  ami           = "ami-0eac975a54dfee8cb"
+  instance_type = var.instance_type
+
+  associate_public_ip_address = true
+  subnet_id                   = var.subnet
+  vpc_security_group_ids      = [aws_security_group.default.id]
+
+  iam_instance_profile = aws_iam_instance_profile.default.id
+  user_data            = file("${path.module}/userdata/${var.userdata}")
+
+  # Requirement for Tailscale
+  source_dest_check = false
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  monitoring    = false
+  ebs_optimized = true
+
+  root_block_device {
+    encrypted   = true
+    volume_type = "gp3"
+  }
+
+  lifecycle {
+    ignore_changes = [
+      ami,
+      associate_public_ip_address,
+      user_data
+    ]
+  }
+
+  tags = {
+    Name = "${var.workload}-router"
+  }
+}
+
+### IAM Role ###
+resource "aws_iam_role" "default" {
+  name = "${var.workload}-subnet-router"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Sid    = ""
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "AmazonSSMManagedInstanceCore" {
+  role       = aws_iam_role.default.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+# Required to install the SSM agent - SSM
+resource "aws_iam_role_policy_attachment" "AmazonSSMReadOnlyAccess" {
+  role       = aws_iam_role.default.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess"
+}
+
+# Required to install the SSM agent - Server policy
+resource "aws_iam_role_policy_attachment" "CloudWatchAgentServerPolicy" {
+  role       = aws_iam_role.default.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+resource "aws_security_group" "default" {
+  name        = "ec2-ssm-${var.workload}-subnet-router"
+  description = "Controls access for EC2 via Session Manager"
+  vpc_id      = var.vpc_id
+
+  tags = {
+    Name = "sg-ssm-${var.workload}-subnet-router"
+  }
+}
+
+data "aws_vpc" "selected" {
+  id = var.vpc_id
+}
+
+
+# # Allow ALL outbound traffic
+# resource "aws_security_group_rule" "allow_all_outbound" {
+#   type              = "egress"
+#   from_port         = 0
+#   to_port           = 0
+#   protocol          = "-1" # all protocols
+#   cidr_blocks       = ["0.0.0.0/0"]
+#   ipv6_cidr_blocks  = ["::/0"]
+#   security_group_id = aws_security_group.default.id
+# }
+
+# Allow outbound TCP port 443 (control plane, DERP relays)
+resource "aws_security_group_rule" "egress_https" {
+  type              = "egress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.default.id
+}
+
+# Allow outbound UDP port 41641 (WireGuard peer connections)
+resource "aws_security_group_rule" "egress_wireguard" {
+  type              = "egress"
+  from_port         = 41641
+  to_port           = 41641
+  protocol          = "udp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.default.id
+}
+
+# Allow outbound UDP port 3478 (STUN for NAT traversal)
+resource "aws_security_group_rule" "egress_stun" {
+  type              = "egress"
+  from_port         = 3478
+  to_port           = 3478
+  protocol          = "udp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.default.id
+}
+
+# Optional: Allow outbound TCP port 80 (captive portal check)
+resource "aws_security_group_rule" "egress_http" {
+  type              = "egress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.default.id
+}
+
+resource "aws_security_group_rule" "egress_ssh" {
+  type              = "egress"
+  from_port         = 22
+  to_port           = 22
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.default.id
+}
